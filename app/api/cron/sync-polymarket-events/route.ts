@@ -155,13 +155,20 @@ async function syncActiveEvents(
       return;
     }
 
+    // Use Polymarket's event-level totals first. A selected market's own volume is often
+    // zero even when the parent event has substantial volume; using it made newly imported
+    // event cards incorrectly display $0. Fall back to the selected market only if needed.
+    const eventVolume = Number(event.volume);
     const marketVolume = Number(compatible.volume);
-    const volume = Number.isFinite(marketVolume) && marketVolume >= 0 ? marketVolume : (Number(event.volume) || 0);
+    const volume = Number.isFinite(eventVolume) && eventVolume > 0
+      ? eventVolume
+      : Number.isFinite(marketVolume) && marketVolume > 0 ? marketVolume : 0;
     const roundedVolume = Math.round(volume * 100) / 100;
+    const eventLiquidity = Number(event.liquidity);
     const marketLiquidity = Number(compatible.liquidity);
-    const sourceLiquidity = Number.isFinite(marketLiquidity) && marketLiquidity >= 0
-      ? marketLiquidity
-      : Math.max(0, Number(event.liquidity) || 0);
+    const sourceLiquidity = Number.isFinite(eventLiquidity) && eventLiquidity > 0
+      ? eventLiquidity
+      : Number.isFinite(marketLiquidity) && marketLiquidity > 0 ? marketLiquidity : 0;
     const roundedSourceLiquidity = Math.round(sourceLiquidity * 100) / 100;
     const sourceUpdatedAt = compatible.updatedAt ?? event.updatedAt ?? null;
     const initialLiquidity = Math.round((roundedSourceLiquidity / 5) * 100) / 100;
