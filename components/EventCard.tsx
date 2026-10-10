@@ -16,7 +16,9 @@ export function EventCard({ event }: { event: Event }) {
   const cpmmRy = Number(event.cpmm_ry ?? yesPool + 500);
   const cpmmRn = Number(event.cpmm_rn ?? noPool + 500);
   const { yesProb, noProb } = getMarketPricesFromReserves(cpmmRy, cpmmRn);
-  const displayVolume = getDisplayVolume(event.polymarket_source_volume_usd, event.source_event_id ?? event.id);
+  const sourceVolume = Number(event.polymarket_source_volume_usd ?? 0);
+  const hasSimulatedVolume = sourceVolume < 50 && Number(event.simulated_volume_usd ?? 0) >= 50;
+  const displayVolume = getDisplayVolume(event.polymarket_source_volume_usd, event.source_event_id ?? event.id, event.simulated_volume_usd);
 
   return (
     <Link
@@ -72,7 +74,7 @@ export function EventCard({ event }: { event: Event }) {
       </div>
 
       <div className="flex items-center justify-between border-t border-zinc-800/70 px-3.5 py-2.5 text-[10px] text-zinc-500 sm:px-4">
-        <span className="inline-flex min-w-0 items-center gap-1.5"><Users className="h-3 w-3 shrink-0" /> <span className="truncate">{formatUsd(displayVolume)} Vol.</span></span>
+        <span className="inline-flex min-w-0 items-center gap-1.5"><Users className="h-3 w-3 shrink-0" /> <span className="truncate">{formatUsd(displayVolume)} {hasSimulatedVolume ? "Sim. Vol." : "Vol."}</span></span>
         <span className="inline-flex items-center gap-1 font-medium text-zinc-500 transition-colors group-hover:text-white">Trade <ArrowUpRight className="h-3 w-3" /></span>
       </div>
     </Link>
