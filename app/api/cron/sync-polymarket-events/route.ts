@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchNewTopEvents, fetchRecentlyClosedEvents, getBinaryOutcomePrices, mapCategory, toBinaryCompatibleMarket } from "@/lib/polymarket/gamma";
+import { fetchNewTopEvents, fetchRecentlyClosedEvents, fetchRecentlyUpdatedEvents, getBinaryOutcomePrices, mapCategory, toBinaryCompatibleMarket } from "@/lib/polymarket/gamma";
 
 const POLYMARKET_CURSOR_KEY = "polymarket_cursor";
 export const maxDuration = 60;
@@ -19,15 +19,11 @@ function selectBestMarket(markets: GammaMarketLike[]) {
   return [...markets].sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0))[0] ?? null;
 }
 
-function calculateLiquidityUsd(volume: number) {
-  return Math.max(1, Math.round(volume * 0.075 * 100) / 100);
-}
-
 async function resolveRecentlyClosedPolymarketEvents(admin: ReturnType<typeof createAdminClient>) {
   // Keep the closed-event scan deliberately bounded because this route runs every minute.
   // The newest closed markets are enough for timely resolution; older ones are revisited by
   // the next runs if they remain active locally.
-  const closedEvents = await fetchRecentlyClosedEvents(30);
+  const closedEvents = await fetchRecentlyClosedEvents(100);
   const sourceIds = closedEvents.map(e => e.id).filter(Boolean);
   if (!sourceIds.length) return { resolved: [], needsReview: [], errors: [] as { id: string; error: string }[] };
 
@@ -119,7 +115,7 @@ async function syncActiveEvents(
 
   const { data: existingRows, error } = await admin
     .from("events")
-    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, total_yes_pool, total_no_pool")
+    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, polymarket_source_liquidity_usd, polymarket_source_updated_at")
     .eq("source_platform", "polymarket")
     .in("source_event_id", sourceIds);
   if (error) throw new Error(error.message);
@@ -148,9 +144,16 @@ async function syncActiveEvents(
       return;
     }
 
-    const volume = Number(compatible.volume) || Number(event.volume) || 0;
+    const marketVolume = Number(compatible.volume);
+    const volume = Number.isFinite(marketVolume) && marketVolume >= 0 ? marketVolume : (Number(event.volume) || 0);
     const roundedVolume = Math.round(volume * 100) / 100;
-    const liquidity = calculateLiquidityUsd(volume);
+    const marketLiquidity = Number(compatible.liquidity);
+    const sourceLiquidity = Number.isFinite(marketLiquidity) && marketLiquidity >= 0
+      ? marketLiquidity
+      : Math.max(0, Number(event.liquidity) || 0);
+    const roundedSourceLiquidity = Math.round(sourceLiquidity * 100) / 100;
+    const sourceUpdatedAt = compatible.updatedAt ?? event.updatedAt ?? null;
+    const initialLiquidity = Math.round((roundedSourceLiquidity / 5) * 100) / 100;
     const existing = existingBySourceId.get(event.id);
 
     try {
@@ -159,16 +162,14 @@ async function syncActiveEvents(
       const category = mapCategory(event.category, event.title, event.description);
 
       if (existing) {
-        const yesPool = Math.max(0.01, Math.round(liquidity * prices.yes * 100) / 100);
-        const noPool = Math.max(0.01, Math.round(liquidity * prices.no * 100) / 100);
         const changed =
           existing.title !== title ||
           existing.description !== description ||
           existing.category !== category ||
           existing.source_condition_id !== compatible.conditionId ||
           Number(existing.polymarket_source_volume_usd ?? 0) !== roundedVolume ||
-          Number(existing.total_yes_pool ?? 0) !== yesPool ||
-          Number(existing.total_no_pool ?? 0) !== noPool;
+          Number(existing.polymarket_source_liquidity_usd ?? 0) !== roundedSourceLiquidity ||
+          (sourceUpdatedAt !== null && existing.polymarket_source_updated_at !== sourceUpdatedAt);
 
         if (!changed) {
           results.skipped.push(event.id);
@@ -183,9 +184,11 @@ async function syncActiveEvents(
             description,
             category,
             source_condition_id: compatible.conditionId,
-            total_yes_pool: yesPool,
-            total_no_pool: noPool,
             polymarket_source_volume_usd: roundedVolume,
+            polymarket_source_liquidity_usd: roundedSourceLiquidity,
+            polymarket_source_updated_at: sourceUpdatedAt,
+            polymarket_synced_at: new Date().toISOString(),
+            simulated_volume_usd: null,
           })
           .eq("id", existing.id);
 
@@ -212,7 +215,7 @@ async function syncActiveEvents(
         p_category: category,
         p_yes_price: prices.yes,
         p_no_price: prices.no,
-        p_initial_liquidity_usd: liquidity,
+        p_initial_liquidity_usd: initialLiquidity,
       });
 
       if (result.error) {
@@ -228,7 +231,13 @@ async function syncActiveEvents(
 
       const volumeResult = await admin
         .from("events")
-        .update({ polymarket_source_volume_usd: roundedVolume })
+        .update({
+          polymarket_source_volume_usd: roundedVolume,
+          polymarket_source_liquidity_usd: roundedSourceLiquidity,
+          polymarket_source_updated_at: sourceUpdatedAt,
+          polymarket_synced_at: new Date().toISOString(),
+          simulated_volume_usd: null,
+        })
         .eq("source_platform", "polymarket")
         .eq("source_event_id", event.id);
 
@@ -261,11 +270,13 @@ async function runSync(request: Request) {
 
     const newestPagePromise = fetchNewTopEvents(null);
     const cursorPagePromise = state?.value ? fetchNewTopEvents(state.value) : newestPagePromise;
-    const [newestPage, cursorPage] = await Promise.all([newestPagePromise, cursorPagePromise]);
+    const updatedEventsPromise = fetchRecentlyUpdatedEvents(100);
+    const [newestPage, cursorPage, updatedEvents] = await Promise.all([newestPagePromise, cursorPagePromise, updatedEventsPromise]);
 
     const byId = new Map<string, (typeof newestPage.events)[number]>();
     for (const event of newestPage.events) byId.set(event.id, event);
     for (const event of cursorPage.events) byId.set(event.id, event);
+    for (const event of updatedEvents) byId.set(event.id, event);
     const events = [...byId.values()];
 
     const { data: adminRows, error: adminLookupError } = await admin
@@ -293,7 +304,7 @@ async function runSync(request: Request) {
     const skipSummary = Object.fromEntries(Object.entries(sync.skipReasons).map(([k, v]) => [k, v.length]));
 
     console.log(
-      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
+      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | updated_page=${updatedEvents.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
     );
 
     return NextResponse.json({
@@ -303,6 +314,7 @@ async function runSync(request: Request) {
       cursor: persistedCursor,
       newestScanned: newestPage.events.length,
       cursorPageScanned: cursorPage.events.length,
+      recentlyUpdatedScanned: updatedEvents.length,
       fetched: events.length,
       imported: sync.imported.length,
       updated: sync.updated.length,
