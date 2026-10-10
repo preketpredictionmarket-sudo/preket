@@ -39,6 +39,7 @@ export interface Event {
   cpmm_rn: number;
   source_event_id?: string | null;
   polymarket_source_volume_usd?: number | null;
+  simulated_volume_usd?: number | null;
   created_at: string;
 }
 
@@ -92,9 +93,12 @@ export function formatPercent(prob: number): string {
  * the real source volume. It must never be used for balances, bets, liquidity,
  * CPMM reserves, or settlement calculations.
  */
-export function getDisplayVolume(sourceVolume: number | null | undefined, seed: string | null | undefined): number {
+export function getDisplayVolume(sourceVolume: number | null | undefined, seed: string | null | undefined, simulatedVolume?: number | null): number {
   const volume = Number(sourceVolume);
-  if (!Number.isFinite(volume) || volume <= 0) return 0;
+  if (!Number.isFinite(volume) || volume < 50) {
+    const simulated = Number(simulatedVolume);
+    return Number.isFinite(simulated) && simulated >= 50 && simulated <= 100000 ? simulated : 0;
+  }
 
   const input = seed || "preket";
   let hash = 2166136261;
