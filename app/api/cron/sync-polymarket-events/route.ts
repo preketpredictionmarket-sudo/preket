@@ -203,32 +203,22 @@ async function syncActiveEvents(
           return;
         }
 
-        const updateValues: Record<string, unknown> = {
-          title,
-          description,
-          category,
-          source_condition_id: compatible.conditionId,
-          polymarket_source_volume_usd: roundedVolume,
-          polymarket_source_liquidity_usd: roundedSourceLiquidity,
-          polymarket_source_updated_at: sourceUpdatedAt,
-          polymarket_synced_at: new Date().toISOString(),
-          simulated_volume_usd: null,
-        };
-        // Reconcile legacy seeded pools to Polymarket liquidity / 5 only when no
-        // Preket trades exist for this event. Never overwrite a pool after users trade.
-        if (!hasLocalTrades) {
-          updateValues.total_yes_pool = targetYesPool;
-          updateValues.total_no_pool = targetNoPool;
-          updateValues.cpmm_ry = 500 + targetYesPool;
-          updateValues.cpmm_rn = 500 + targetNoPool;
-        }
-        const result = await admin
-          .from("events")
-          .update(updateValues)
-          .eq("id", existing.id);
+        const result = await admin.rpc("sync_external_event", {
+          p_event_id: existing.id,
+          p_title: title,
+          p_description: description,
+          p_category: category,
+          p_source_condition_id: compatible.conditionId,
+          p_source_volume_usd: roundedVolume,
+          p_source_liquidity_usd: roundedSourceLiquidity,
+          p_source_updated_at: sourceUpdatedAt,
+          p_yes_price: prices.yes,
+          p_no_price: prices.no,
+        });
 
         if (result.error) results.importErrors.push({ id: event.id, error: result.error.message });
-        else results.updated.push(event.id);
+        else if (result.data) results.updated.push(event.id);
+        else results.skipped.push(event.id);
         return;
       }
 
