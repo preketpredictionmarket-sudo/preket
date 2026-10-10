@@ -129,11 +129,13 @@ Deno.serve(async (req: Request) => {
     const newestPromise = fetchKeyset(null)
     const cursorPromise = state?.value ? fetchKeyset(state.value) : newestPromise
     const updatedPromise = fetchRecentlyUpdated()
-    const [newest, cursorPage, updated] = await Promise.all([newestPromise, cursorPromise, updatedPromise])
+    const closedPromise = fetchRecentlyClosed()
+    const [newest, cursorPage, updated, closedEvents] = await Promise.all([newestPromise, cursorPromise, updatedPromise, closedPromise])
     const byId = new Map<string, SourceEvent>()
     for (const e of newest.events) byId.set(e.id, e)
     for (const e of cursorPage.events) byId.set(e.id, e)
     for (const e of updated) byId.set(e.id, e)
+    for (const e of closedEvents) byId.set(e.id, e)
     const events = [...byId.values()]
 
     const ids = events.map(e => e.id)
@@ -219,7 +221,6 @@ Deno.serve(async (req: Request) => {
     }
     for (let i = 0; i < events.length; i += 8) await Promise.all(events.slice(i, i + 8).map(processEvent))
 
-    const closedEvents = await fetchRecentlyClosed()
     const closedIds = closedEvents.map(e => e.id)
     let activeLocal: any[] = []
     for (let i = 0; i < closedIds.length; i += 100) {
