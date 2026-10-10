@@ -115,7 +115,7 @@ async function syncActiveEvents(
 
   const { data: existingRows, error } = await admin
     .from("events")
-    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, polymarket_source_liquidity_usd, polymarket_source_updated_at, total_yes_pool, total_no_pool, cpmm_ry, cpmm_rn")
+    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, polymarket_source_liquidity_usd, polymarket_source_updated_at, polymarket_synced_at, total_yes_pool, total_no_pool, cpmm_ry, cpmm_rn")
     .eq("source_platform", "polymarket")
     .in("source_event_id", sourceIds);
   if (error) throw new Error(error.message);
