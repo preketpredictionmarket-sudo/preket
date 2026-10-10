@@ -189,8 +189,10 @@ async function syncActiveEvents(
           existing.description !== description ||
           existing.category !== category ||
           existing.source_condition_id !== compatible.conditionId ||
-          Number(existing.polymarket_source_volume_usd ?? 0) !== roundedVolume ||
-          Number(existing.polymarket_source_liquidity_usd ?? 0) !== roundedSourceLiquidity ||
+          existing.polymarket_source_volume_usd == null ||
+          Number(existing.polymarket_source_volume_usd) !== roundedVolume ||
+          existing.polymarket_source_liquidity_usd == null ||
+          Number(existing.polymarket_source_liquidity_usd) !== roundedSourceLiquidity ||
           (sourceUpdatedAt !== null && existing.polymarket_source_updated_at !== sourceUpdatedAt) ||
           !existing.polymarket_synced_at ||
           poolChanged;
