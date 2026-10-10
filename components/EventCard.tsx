@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { Event } from "@/lib/types";
-import { formatUsd, getDisplayVolume } from "@/lib/types";
+import { formatUsd, getDisplayLiquidity, getDisplayVolume } from "@/lib/types";
 import { getMarketPricesFromReserves } from "@/lib/market-math";
 import { getCategoryMeta } from "@/lib/market-ui";
 import { MarketOdds } from "@/components/MarketOdds";
@@ -16,8 +16,8 @@ export function EventCard({ event }: { event: Event }) {
   const cpmmRy = Number(event.cpmm_ry ?? yesPool + 500);
   const cpmmRn = Number(event.cpmm_rn ?? noPool + 500);
   const { yesProb, noProb } = getMarketPricesFromReserves(cpmmRy, cpmmRn);
-  const displayVolume = getDisplayVolume(event.polymarket_source_volume_usd);
-  const preketTradeVolume = Number(event.preket_trade_volume_usd ?? 0);
+  const totalVolume = getDisplayVolume(event.polymarket_source_volume_usd) + Number(event.preket_trade_volume_usd ?? 0);
+  const totalLiquidity = getDisplayLiquidity(event.polymarket_source_liquidity_usd);
 
   return (
     <Link
@@ -72,9 +72,9 @@ export function EventCard({ event }: { event: Event }) {
         )}
       </div>
 
-      <div className="flex items-center justify-between border-t border-zinc-800/70 px-3.5 py-2.5 text-[10px] text-zinc-500 sm:px-4">
-        <span className="inline-flex min-w-0 items-center gap-1.5"><Users className="h-3 w-3 shrink-0" /> <span className="truncate" title={`Polymarket volume / 5: ${formatUsd(displayVolume)}; Preket local trade volume: ${formatUsd(preketTradeVolume)}`}>PM 1/5 {formatUsd(displayVolume)} · Preket {formatUsd(preketTradeVolume)}</span></span>
-        <span className="inline-flex items-center gap-1 font-medium text-zinc-500 transition-colors group-hover:text-white">Trade <ArrowUpRight className="h-3 w-3" /></span>
+      <div className="flex items-center justify-between gap-2 border-t border-zinc-800/70 px-3.5 py-2.5 text-[10px] text-zinc-500 sm:px-4">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1"><span className="inline-flex items-center gap-1"><Users className="h-3 w-3 shrink-0" /><span>Total Volume <strong className="font-semibold text-zinc-300">{formatUsd(totalVolume)}</strong></span></span><span className="inline-flex items-center gap-1"><span>Total Liquidity <strong className="font-semibold text-zinc-300">{formatUsd(totalLiquidity)}</strong></span></span></div>
+        <span className="inline-flex shrink-0 items-center gap-1 font-medium text-zinc-500 transition-colors group-hover:text-white">Trade <ArrowUpRight className="h-3 w-3" /></span>
       </div>
     </Link>
   );
