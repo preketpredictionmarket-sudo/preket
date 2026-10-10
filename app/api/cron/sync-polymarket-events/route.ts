@@ -19,11 +19,10 @@ function selectBestMarket(markets: GammaMarketLike[]) {
   return [...markets].sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0))[0] ?? null;
 }
 
-async function resolveRecentlyClosedPolymarketEvents(admin: ReturnType<typeof createAdminClient>) {
+async function resolveRecentlyClosedPolymarketEvents(admin: ReturnType<typeof createAdminClient>, closedEvents: Awaited<ReturnType<typeof fetchRecentlyClosedEvents>>) {
   // Keep the closed-event scan deliberately bounded because this route runs every minute.
   // The newest closed markets are enough for timely resolution; older ones are revisited by
   // the next runs if they remain active locally.
-  const closedEvents = await fetchRecentlyClosedEvents(100);
   const sourceIds = closedEvents.map(e => e.id).filter(Boolean);
   if (!sourceIds.length) return { resolved: [], needsReview: [], errors: [] as { id: string; error: string }[] };
 
@@ -305,12 +304,14 @@ async function runSync(request: Request) {
     const newestPagePromise = fetchNewTopEvents(null);
     const cursorPagePromise = state?.value ? fetchNewTopEvents(state.value) : newestPagePromise;
     const updatedEventsPromise = fetchRecentlyUpdatedEvents(100);
-    const [newestPage, cursorPage, updatedEvents] = await Promise.all([newestPagePromise, cursorPagePromise, updatedEventsPromise]);
+    const closedEventsPromise = fetchRecentlyClosedEvents(100);
+    const [newestPage, cursorPage, updatedEvents, closedEvents] = await Promise.all([newestPagePromise, cursorPagePromise, updatedEventsPromise, closedEventsPromise]);
 
     const byId = new Map<string, (typeof newestPage.events)[number]>();
     for (const event of newestPage.events) byId.set(event.id, event);
     for (const event of cursorPage.events) byId.set(event.id, event);
     for (const event of updatedEvents) byId.set(event.id, event);
+    for (const event of closedEvents) byId.set(event.id, event);
     const events = [...byId.values()];
 
     const { data: adminRows, error: adminLookupError } = await admin
@@ -322,7 +323,7 @@ async function runSync(request: Request) {
     const allowNewImports = Boolean(adminRows?.length);
 
     const sync = await syncActiveEvents(admin, events, allowNewImports);
-    const resolution = await resolveRecentlyClosedPolymarketEvents(admin);
+    const resolution = await resolveRecentlyClosedPolymarketEvents(admin, closedEvents);
     const nextCursor = cursorPage.nextCursor;
     // Keep the current cursor while new imports are blocked, so the page is retried after
     // an admin/house account is configured instead of silently advancing past those markets.
@@ -338,7 +339,7 @@ async function runSync(request: Request) {
     const skipSummary = Object.fromEntries(Object.entries(sync.skipReasons).map(([k, v]) => [k, v.length]));
 
     console.log(
-      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | updated_page=${updatedEvents.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
+      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | updated_page=${updatedEvents.length} | closed_page=${closedEvents.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
     );
 
     return NextResponse.json({
@@ -349,6 +350,7 @@ async function runSync(request: Request) {
       newestScanned: newestPage.events.length,
       cursorPageScanned: cursorPage.events.length,
       recentlyUpdatedScanned: updatedEvents.length,
+      recentlyClosedScanned: closedEvents.length,
       fetched: events.length,
       imported: sync.imported.length,
       updated: sync.updated.length,
