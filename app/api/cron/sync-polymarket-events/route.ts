@@ -123,12 +123,14 @@ async function syncActiveEvents(
   const existingEventIds = (existingRows ?? []).map(row => row.id as string);
   const eventIdsWithTrades = new Set<string>();
   if (existingEventIds.length) {
-    const { data: tradeRows, error: tradeError } = await admin
-      .from("bets")
-      .select("event_id")
-      .in("event_id", existingEventIds);
-    if (tradeError) throw new Error(tradeError.message);
-    for (const row of tradeRows ?? []) eventIdsWithTrades.add(row.event_id as string);
+    for (let i = 0; i < existingEventIds.length; i += 100) {
+      const { data: tradeRows, error: tradeError } = await admin
+        .from("bets")
+        .select("event_id")
+        .in("event_id", existingEventIds.slice(i, i + 100));
+      if (tradeError) throw new Error(tradeError.message);
+      for (const row of tradeRows ?? []) eventIdsWithTrades.add(row.event_id as string);
+    }
   }
 
   const processEvent = async (event: (typeof events)[number]) => {
