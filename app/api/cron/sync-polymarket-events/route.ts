@@ -115,12 +115,22 @@ async function syncActiveEvents(
 
   const { data: existingRows, error } = await admin
     .from("events")
-    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, polymarket_source_liquidity_usd, polymarket_source_updated_at")
+    .select("id, source_event_id, source_condition_id, title, description, category, polymarket_source_volume_usd, polymarket_source_liquidity_usd, polymarket_source_updated_at, total_yes_pool, total_no_pool, cpmm_ry, cpmm_rn")
     .eq("source_platform", "polymarket")
     .in("source_event_id", sourceIds);
   if (error) throw new Error(error.message);
 
   const existingBySourceId = new Map((existingRows ?? []).map(row => [row.source_event_id as string, row]));
+  const existingEventIds = (existingRows ?? []).map(row => row.id as string);
+  const eventIdsWithTrades = new Set<string>();
+  if (existingEventIds.length) {
+    const { data: tradeRows, error: tradeError } = await admin
+      .from("bets")
+      .select("event_id")
+      .in("event_id", existingEventIds);
+    if (tradeError) throw new Error(tradeError.message);
+    for (const row of tradeRows ?? []) eventIdsWithTrades.add(row.event_id as string);
+  }
 
   const processEvent = async (event: (typeof events)[number]) => {
     const market = selectBestMarket(event.markets ?? []);
@@ -162,6 +172,19 @@ async function syncActiveEvents(
       const category = mapCategory(event.category, event.title, event.description);
 
       if (existing) {
+        const hasLocalTrades = eventIdsWithTrades.has(existing.id as string);
+        const targetPool = initialLiquidity;
+        const priceTotal = Math.max(prices.yes + prices.no, 0.02);
+        const targetYesPool = targetPool > 0
+          ? Math.round((targetPool * prices.yes / priceTotal) * 100) / 100
+          : 0;
+        const targetNoPool = Math.round((targetPool - targetYesPool) * 100) / 100;
+        const poolChanged = !hasLocalTrades && (
+          Number(existing.total_yes_pool ?? 0) !== targetYesPool ||
+          Number(existing.total_no_pool ?? 0) !== targetNoPool ||
+          Number(existing.cpmm_ry ?? 0) !== 500 + targetYesPool ||
+          Number(existing.cpmm_rn ?? 0) !== 500 + targetNoPool
+        );
         const changed =
           existing.title !== title ||
           existing.description !== description ||
@@ -169,7 +192,9 @@ async function syncActiveEvents(
           existing.source_condition_id !== compatible.conditionId ||
           Number(existing.polymarket_source_volume_usd ?? 0) !== roundedVolume ||
           Number(existing.polymarket_source_liquidity_usd ?? 0) !== roundedSourceLiquidity ||
-          (sourceUpdatedAt !== null && existing.polymarket_source_updated_at !== sourceUpdatedAt);
+          (sourceUpdatedAt !== null && existing.polymarket_source_updated_at !== sourceUpdatedAt) ||
+          !existing.polymarket_synced_at ||
+          poolChanged;
 
         if (!changed) {
           results.skipped.push(event.id);
@@ -177,19 +202,28 @@ async function syncActiveEvents(
           return;
         }
 
+        const updateValues: Record<string, unknown> = {
+          title,
+          description,
+          category,
+          source_condition_id: compatible.conditionId,
+          polymarket_source_volume_usd: roundedVolume,
+          polymarket_source_liquidity_usd: roundedSourceLiquidity,
+          polymarket_source_updated_at: sourceUpdatedAt,
+          polymarket_synced_at: new Date().toISOString(),
+          simulated_volume_usd: null,
+        };
+        // Reconcile legacy seeded pools to Polymarket liquidity / 5 only when no
+        // Preket trades exist for this event. Never overwrite a pool after users trade.
+        if (!hasLocalTrades) {
+          updateValues.total_yes_pool = targetYesPool;
+          updateValues.total_no_pool = targetNoPool;
+          updateValues.cpmm_ry = 500 + targetYesPool;
+          updateValues.cpmm_rn = 500 + targetNoPool;
+        }
         const result = await admin
           .from("events")
-          .update({
-            title,
-            description,
-            category,
-            source_condition_id: compatible.conditionId,
-            polymarket_source_volume_usd: roundedVolume,
-            polymarket_source_liquidity_usd: roundedSourceLiquidity,
-            polymarket_source_updated_at: sourceUpdatedAt,
-            polymarket_synced_at: new Date().toISOString(),
-            simulated_volume_usd: null,
-          })
+          .update(updateValues)
           .eq("id", existing.id);
 
         if (result.error) results.importErrors.push({ id: event.id, error: result.error.message });
