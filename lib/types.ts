@@ -39,6 +39,10 @@ export interface Event {
   cpmm_rn: number;
   source_event_id?: string | null;
   polymarket_source_volume_usd?: number | null;
+  polymarket_source_liquidity_usd?: number | null;
+  polymarket_source_updated_at?: string | null;
+  polymarket_synced_at?: string | null;
+  preket_trade_volume_usd?: number | null;
   simulated_volume_usd?: number | null;
   created_at: string;
 }
@@ -88,30 +92,17 @@ export function formatPercent(prob: number): string {
 }
 
 /**
- * Stable display-only volume derived from the latest Polymarket source volume.
- * It is intentionally high-looking and irregular, but is always strictly below
- * the real source volume. It must never be used for balances, bets, liquidity,
- * CPMM reserves, or settlement calculations.
+ * Polymarket source metrics are displayed at exactly 20% (source / 5).
+ * Preket's own trades are stored and displayed separately.
  */
-export function getDisplayVolume(sourceVolume: number | null | undefined, seed: string | null | undefined, simulatedVolume?: number | null): number {
+export function getDisplayVolume(sourceVolume: number | null | undefined): number {
   const volume = Number(sourceVolume);
-  if (!Number.isFinite(volume) || volume < 50) {
-    const simulated = Number(simulatedVolume);
-    return Number.isFinite(simulated) && simulated >= 50 && simulated <= 100000 ? simulated : 0;
-  }
+  if (!Number.isFinite(volume) || volume < 0) return 0;
+  return Math.round((volume / 5) * 100) / 100;
+}
 
-  const input = seed || "preket";
-  let hash = 2166136261;
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  // 72.00%–94.99% of source volume, stable per event.
-  const ratio = 0.72 + (Math.abs(hash) % 2300) / 10000;
-  let display = Math.floor(volume * ratio * 100) / 100;
-
-  // Strictly below source volume even after rounding.
-  if (display >= volume) display = Math.max(0, Math.floor((volume - 0.01) * 100) / 100);
-  return display;
+export function getDisplayLiquidity(sourceLiquidity: number | null | undefined): number {
+  const liquidity = Number(sourceLiquidity);
+  if (!Number.isFinite(liquidity) || liquidity < 0) return 0;
+  return Math.round((liquidity / 5) * 100) / 100;
 }
