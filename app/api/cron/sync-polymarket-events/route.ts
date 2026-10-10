@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchNewTopEvents, fetchRecentlyClosedEvents, fetchRecentlyUpdatedEvents, getBinaryOutcomePrices, mapCategory, toBinaryCompatibleMarket } from "@/lib/polymarket/gamma";
+import { fetchEventById, fetchNewTopEvents, fetchRecentlyClosedEvents, fetchRecentlyUpdatedEvents, getBinaryOutcomePrices, mapCategory, toBinaryCompatibleMarket } from "@/lib/polymarket/gamma";
 
 const POLYMARKET_CURSOR_KEY = "polymarket_cursor";
 export const maxDuration = 60;
@@ -289,6 +289,91 @@ async function syncActiveEvents(
   return results;
 }
 
+
+/**
+ * Rotating metadata-only reconciliation for existing Polymarket rows.
+ *
+ * Intentionally does not call import/sync RPCs: this pass must never seed,
+ * rebalance, or debit liquidity. It only refreshes source metadata columns.
+ * Null audit timestamps are processed first; successful and failed attempts
+ * are timestamped so a single unavailable source event cannot block progress.
+ */
+async function runRotatingMetadataAudit(admin: ReturnType<typeof createAdminClient>) {
+  const { data: rows, error } = await admin
+    .from("events")
+    .select("id, source_event_id")
+    .eq("source_platform", "polymarket")
+    .not("source_event_id", "is", null)
+    .order("polymarket_audit_checked_at", { ascending: true, nullsFirst: true })
+    .order("created_at", { ascending: true })
+    .limit(20);
+
+  if (error) throw new Error(`Polymarket audit batch query failed: ${error.message}`);
+
+  const summary = { checked: 0, synced: 0, missing: 0, errors: 0 };
+  const CONCURRENCY = 8;
+  const processRow = async (row: { id: string; source_event_id: string | null }) => {
+    const checkedAt = new Date().toISOString();
+    summary.checked += 1;
+    try {
+      if (!row.source_event_id) {
+        summary.missing += 1;
+        await admin.from("events").update({ polymarket_audit_checked_at: checkedAt }).eq("id", row.id);
+        return;
+      }
+
+      const sourceEvent = await fetchEventById(row.source_event_id);
+      if (!sourceEvent) {
+        summary.missing += 1;
+        const markResult = await admin.from("events")
+          .update({ polymarket_audit_checked_at: checkedAt })
+          .eq("id", row.id);
+        if (markResult.error) throw new Error(markResult.error.message);
+        return;
+      }
+
+      const market = selectBestMarket(sourceEvent.markets ?? []);
+      const eventVolume = Number(sourceEvent.volume);
+      const marketVolume = Number(market?.volume);
+      const volume = Number.isFinite(eventVolume) && eventVolume > 0
+        ? eventVolume
+        : Number.isFinite(marketVolume) && marketVolume > 0 ? marketVolume : 0;
+      const eventLiquidity = Number(sourceEvent.liquidity);
+      const marketLiquidity = Number(market?.liquidity);
+      const liquidity = Number.isFinite(eventLiquidity) && eventLiquidity > 0
+        ? eventLiquidity
+        : Number.isFinite(marketLiquidity) && marketLiquidity > 0 ? marketLiquidity : 0;
+      const sourceUpdatedAt = market?.updatedAt ?? sourceEvent.updatedAt ?? null;
+
+      const updateResult = await admin.from("events").update({
+        polymarket_source_volume_usd: Math.round(Math.max(volume, 0) * 100) / 100,
+        polymarket_source_liquidity_usd: Math.round(Math.max(liquidity, 0) * 100) / 100,
+        polymarket_source_updated_at: sourceUpdatedAt,
+        polymarket_synced_at: checkedAt,
+        polymarket_audit_checked_at: checkedAt,
+      }).eq("id", row.id);
+
+      if (updateResult.error) throw new Error(updateResult.error.message);
+      summary.synced += 1;
+    } catch (err) {
+      summary.errors += 1;
+      const markResult = await admin.from("events")
+        .update({ polymarket_audit_checked_at: checkedAt })
+        .eq("id", row.id);
+      if (markResult.error) {
+        console.error(`[Polymarket Audit] failed to mark attempt for ${row.source_event_id ?? row.id}: ${markResult.error.message}`);
+      }
+      console.error(`[Polymarket Audit] source_id=${row.source_event_id ?? "missing"} | error=${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+  };
+
+  for (let i = 0; i < (rows ?? []).length; i += CONCURRENCY) {
+    await Promise.all((rows ?? []).slice(i, i + CONCURRENCY).map(processRow));
+  }
+
+  return summary;
+}
+
 async function runSync(request: Request) {
   const startedAt = new Date().toISOString();
   if (!checkCronAuth(request)) return NextResponse.json({ error: "Forbidden", startedAt }, { status: 403 });
@@ -325,6 +410,7 @@ async function runSync(request: Request) {
 
     const sync = await syncActiveEvents(admin, events, allowNewImports);
     const resolution = await resolveRecentlyClosedPolymarketEvents(admin, closedEvents);
+    const metadataAudit = await runRotatingMetadataAudit(admin);
     const nextCursor = cursorPage.nextCursor;
     // Keep the current cursor while new imports are blocked, so the page is retried after
     // an admin/house account is configured instead of silently advancing past those markets.
@@ -340,7 +426,7 @@ async function runSync(request: Request) {
     const skipSummary = Object.fromEntries(Object.entries(sync.skipReasons).map(([k, v]) => [k, v.length]));
 
     console.log(
-      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | updated_page=${updatedEvents.length} | closed_page=${closedEvents.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
+      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | updated_page=${updatedEvents.length} | closed_page=${closedEvents.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | audit_checked=${metadataAudit.checked} | audit_synced=${metadataAudit.synced} | audit_missing=${metadataAudit.missing} | audit_errors=${metadataAudit.errors} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
     );
 
     return NextResponse.json({
@@ -361,6 +447,7 @@ async function runSync(request: Request) {
       resolved: resolution.resolved.length,
       needsReview: resolution.needsReview.length,
       resolutionErrors: resolution.errors.length,
+      metadataAudit,
       skipReasons: skipSummary,
     });
   } catch (err) {
