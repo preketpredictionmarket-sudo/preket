@@ -96,7 +96,8 @@ async function resolveRecentlyClosedPolymarketEvents(admin: ReturnType<typeof cr
 
 async function syncActiveEvents(
   admin: ReturnType<typeof createAdminClient>,
-  events: Awaited<ReturnType<typeof fetchNewTopEvents>>["events"]
+  events: Awaited<ReturnType<typeof fetchNewTopEvents>>["events"],
+  allowNewImports: boolean
 ) {
   const results = {
     imported: [] as string[],
@@ -108,6 +109,7 @@ async function syncActiveEvents(
       noPrices: [] as string[],
       unchangedExisting: [] as string[],
       rpcReturnedFalse: [] as string[],
+      missingHouseAccount: [] as string[],
     },
   };
 
@@ -192,6 +194,15 @@ async function syncActiveEvents(
         return;
       }
 
+      // Do not repeatedly trigger a known database exception on every minute's cron run.
+      // Existing markets still update; new imports resume automatically once an admin/house
+      // account is configured in the database.
+      if (!allowNewImports) {
+        results.skipped.push(event.id);
+        results.skipReasons.missingHouseAccount.push(event.id);
+        return;
+      }
+
       const result = await admin.rpc("import_external_event", {
         p_source_platform: "polymarket",
         p_source_event_id: event.id,
@@ -257,7 +268,15 @@ async function runSync(request: Request) {
     for (const event of cursorPage.events) byId.set(event.id, event);
     const events = [...byId.values()];
 
-    const sync = await syncActiveEvents(admin, events);
+    const { data: adminRows, error: adminLookupError } = await admin
+      .from("users")
+      .select("id")
+      .eq("role", "admin")
+      .limit(1);
+    if (adminLookupError) throw new Error(adminLookupError.message);
+    const allowNewImports = Boolean(adminRows?.length);
+
+    const sync = await syncActiveEvents(admin, events, allowNewImports);
     const resolution = await resolveRecentlyClosedPolymarketEvents(admin);
     const nextCursor = cursorPage.nextCursor;
     const r = await admin
@@ -269,10 +288,8 @@ async function runSync(request: Request) {
     const skipSummary = Object.fromEntries(Object.entries(sync.skipReasons).map(([k, v]) => [k, v.length]));
 
     console.log(
-      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs}`
+      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | skip_reasons=${JSON.stringify(skipSummary)}`
     );
-    console.log(`[Polymarket Sync] cursor=${nextCursor ?? "null"}`);
-    console.log(`[Polymarket Sync] skip_reasons=${JSON.stringify(skipSummary)}`);
 
     return NextResponse.json({
       ok: true,
