@@ -69,7 +69,7 @@ export default async function EventsPage({ searchParams }: { searchParams: Promi
   const currentPage = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
   const from = (currentPage - 1) * PAGE_SIZE;
 
-  let eventsQuery = supabase.from("events").select("*", { count: "exact" }).order("created_at", { ascending: false }).range(from, from + PAGE_SIZE - 1);
+  let eventsQuery = supabase.from("events").select("*", { count: "exact" }).order("polymarket_source_volume_usd", { ascending: false, nullsFirst: false }).order("created_at", { ascending: false }).range(from, from + PAGE_SIZE - 1);
   if (statusFilter !== "all") eventsQuery = eventsQuery.eq("status", statusFilter);
   if (selectedTopic) eventsQuery = eventsQuery.or(termsWhere(selectedTopic.terms));
   else if (selectedCategory?.dbCategories?.length) eventsQuery = eventsQuery.in("category", selectedCategory.dbCategories);
