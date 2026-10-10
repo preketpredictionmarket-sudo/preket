@@ -279,23 +279,28 @@ async function runSync(request: Request) {
     const sync = await syncActiveEvents(admin, events, allowNewImports);
     const resolution = await resolveRecentlyClosedPolymarketEvents(admin);
     const nextCursor = cursorPage.nextCursor;
-    const r = await admin
-      .from("sync_state")
-      .upsert({ key: POLYMARKET_CURSOR_KEY, value: nextCursor, updated_at: new Date().toISOString() });
-    if (r.error) throw new Error(r.error.message);
+    // Keep the current cursor while new imports are blocked, so the page is retried after
+    // an admin/house account is configured instead of silently advancing past those markets.
+    const persistedCursor = allowNewImports ? nextCursor : (state?.value ?? null);
+    if (allowNewImports) {
+      const r = await admin
+        .from("sync_state")
+        .upsert({ key: POLYMARKET_CURSOR_KEY, value: nextCursor, updated_at: new Date().toISOString() });
+      if (r.error) throw new Error(r.error.message);
+    }
 
     const durationMs = Date.now() - new Date(startedAt).getTime();
     const skipSummary = Object.fromEntries(Object.entries(sync.skipReasons).map(([k, v]) => [k, v.length]));
 
     console.log(
-      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | skip_reasons=${JSON.stringify(skipSummary)}`
+      `[Polymarket Sync] ${new Date().toISOString()} | status=OK | newest=${newestPage.events.length} | cursor_page=${cursorPage.events.length} | fetched_unique=${events.length} | imported=${sync.imported.length} | updated=${sync.updated.length} | skipped=${sync.skipped.length} | import_errors=${sync.importErrors.length} | allow_new_imports=${allowNewImports} | resolved=${resolution.resolved.length} | needs_review=${resolution.needsReview.length} | resolution_errors=${resolution.errors.length} | duration_ms=${durationMs} | cursor_advanced=${allowNewImports} | skip_reasons=${JSON.stringify(skipSummary)}`
     );
 
     return NextResponse.json({
       ok: true,
       startedAt,
       completedAt: new Date().toISOString(),
-      cursor: nextCursor,
+      cursor: persistedCursor,
       newestScanned: newestPage.events.length,
       cursorPageScanned: cursorPage.events.length,
       fetched: events.length,
